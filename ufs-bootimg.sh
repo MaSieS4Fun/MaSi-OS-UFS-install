@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# MaSi ABL boot/KERNEL helpers (diagnostics + legacy repair).
-# Normal flow: one KERNEL with root=PARTLABEL=STORAGE — copy to ROCKNIX, no patch.
+# MaSi ABL boot/KERNEL helpers for UFS ROCKNIX install.
+# SD keeps dual-boot KERNEL (root=UUID=...).
+# ROCKNIX always gets root=PARTLABEL=STORAGE (UFS boot must not depend on SD UUID).
 set -euo pipefail
 
 UFS_INTERNAL_CMDLINE='clk_ignore_unused pd_ignore_unused quiet rw rootwait root=PARTLABEL=STORAGE rootfstype=ext4 errors=remount-ro mem_sleep_default=deep ufshcd_core.uic_cmd_timeout=3000'
@@ -15,13 +16,45 @@ read_bootimg_cmdline() {
     strings "$kernel" 2>/dev/null | grep -m1 '^clk_ignore_unused' || return 1
 }
 
-patch_kernel_for_internal_boot() {
+# Build ROCKNIX cmdline from an existing KERNEL (keeps suspend/debug extras, forces PARTLABEL root).
+build_ufs_rocknix_cmdline() {
+    local src="${1:-}"
+    local cmdline token
+    local -a out=()
+
+    if [[ -n "$src" && -f "$src" ]]; then
+        cmdline="$(read_bootimg_cmdline "$src" || true)"
+    fi
+
+    if [[ -z "${cmdline:-}" ]]; then
+        printf '%s' "$UFS_INTERNAL_CMDLINE"
+        return 0
+    fi
+
+    for token in $cmdline; do
+        case "$token" in
+            root=*|rootfstype=*|errors=*|masi.ufsroot=*|masi.sdroot=*|masi.root=*)
+                continue
+                ;;
+            *)
+                out+=("$token")
+                ;;
+        esac
+    done
+
+    out+=("root=PARTLABEL=STORAGE" "rootfstype=ext4" "errors=remount-ro")
+    printf '%s' "${out[*]}"
+}
+
+# Pack KERNEL for ROCKNIX: same zImage/initrd as src, UFS-only cmdline.
+install_kernel_for_ufs_rocknix() {
     local src="$1" dst="$2"
-    local cmdline="${3:-$UFS_INTERNAL_CMDLINE}"
-    local work zimage initrd cfg
+    local cmdline work zimage initrd cfg
 
     command -v abootimg >/dev/null 2>&1 || return 1
     [[ -f "$src" ]] || return 1
+
+    cmdline="$(build_ufs_rocknix_cmdline "$src")"
 
     work="$(mktemp -d)"
     if ! (
@@ -56,12 +89,30 @@ patch_kernel_for_internal_boot() {
     [[ -s "${dst}" ]]
 }
 
+# Legacy alias
+patch_kernel_for_internal_boot() {
+    local src="$1" dst="$2"
+    # Optional third arg (old callers passed cmdline) — ignored; rebuilt from src.
+    install_kernel_for_ufs_rocknix "$src" "$dst"
+}
+
+# ROCKNIX KERNEL after install: must be PARTLABEL only (not SD UUID).
+verify_ufs_rocknix_kernel_cmdline() {
+    local kernel="$1" cmdline
+
+    cmdline="$(read_bootimg_cmdline "${kernel}" || true)"
+    [[ -n "${cmdline}" ]] || return 1
+    [[ "${cmdline}" == *'root=PARTLABEL=STORAGE'* ]] || return 1
+    [[ "${cmdline}" != *'root=UUID='* ]] || return 1
+    [[ "${cmdline}" != *'masi.ufsroot='* ]] || return 1
+}
+
+# Accept dual-boot SD KERNEL or UFS ROCKNIX KERNEL.
 verify_internal_kernel_cmdline() {
     local kernel="$1" cmdline
 
     cmdline="$(read_bootimg_cmdline "${kernel}" || true)"
     [[ -n "${cmdline}" ]] || return 1
-    # Dual-boot KERNEL: root=UUID= + masi.ufsroot, or legacy root=PARTLABEL= only
     if [[ "${cmdline}" == *'masi.ufsroot=PARTLABEL=STORAGE'* ]]; then
         [[ "${cmdline}" == *'root=UUID='* ]] || return 1
         return 0
@@ -75,12 +126,12 @@ describe_kernel_root() {
     cmdline="$(read_bootimg_cmdline "${kernel}" || true)"
     if [[ -z "${cmdline}" ]]; then
         echo "unknown (could not read bootimg cmdline)"
+    elif [[ "${cmdline}" == *'root=PARTLABEL=STORAGE'* && "${cmdline}" != *'root=UUID='* ]]; then
+        echo "UFS ROCKNIX (root=PARTLABEL=STORAGE)"
     elif [[ "${cmdline}" == *'masi.ufsroot=PARTLABEL=STORAGE'* && "${cmdline}" == *'root=UUID='* ]]; then
-        echo "dual-boot (SD root=UUID + UFS masi.ufsroot=PARTLABEL=STORAGE)"
-    elif [[ "${cmdline}" == *'root=PARTLABEL=STORAGE'* ]]; then
-        echo "UFS-only cmdline (run update.sh for dual-boot SD+UFS)"
+        echo "microSD dual-boot (root=UUID + masi.ufsroot)"
     elif [[ "${cmdline}" == *'root=UUID='* ]]; then
-        echo "microSD only (legacy — run update.sh for UFS dual-boot)"
+        echo "microSD only (legacy — not safe for UFS ROCKNIX)"
     else
         echo "other: ${cmdline}"
     fi

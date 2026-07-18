@@ -70,10 +70,19 @@ sudo ./ufs-fix-internal-boot.sh
 
 | Script | Purpose |
 |--------|---------|
-| `install-masios-to-internal.sh` | Repartition UFS + copy KERNEL + rootfs |
-| `ufs-diagnose.sh` | Show UFS layout, SD vs internal KERNEL cmdline |
-| `ufs-fix-internal-boot.sh` | Copy `/boot/KERNEL` to ROCKNIX; fix fstab |
-| `ufs-bootimg.sh` | Shared helpers (legacy patch + diagnostics) |
+| `install-masios-to-internal.sh` | Repartition UFS + install UFS-safe KERNEL + rootfs |
+| `ufs-diagnose.sh` | Show UFS layout, SD vs ROCKNIX KERNEL cmdline |
+| `ufs-fix-internal-boot.sh` | Rewrite ROCKNIX KERNEL to `root=PARTLABEL=STORAGE`; fix fstab |
+| `ufs-bootimg.sh` | Shared helpers (pack UFS KERNEL from SD KERNEL) |
+
+## How boot works (v1.8+)
+
+| Location | KERNEL cmdline |
+|----------|----------------|
+| microSD `/boot/KERNEL` | `root=UUID=<SD>` (+ optional `masi.ufsroot=...`) |
+| UFS `ROCKNIX/KERNEL` | **`root=PARTLABEL=STORAGE` only** (packed at install time) |
+
+Internal Linux boot does **not** depend on the microSD being present or on initramfs dual-root races.
 
 ## Options (`install-masios-to-internal.sh`)
 
@@ -88,9 +97,20 @@ sudo ./ufs-fix-internal-boot.sh
 
 ## Typical flow after install
 
-1. Reboot → test **Linux from UFS** (remove microSD for first internal boot if dual-root picks SD).  
+1. **Remove microSD**, reboot → ABL Linux mode → MaSi-OS from UFS.  
 2. Boot **Android recovery** → **Factory data reset** (userdata was wiped).  
-3. Keep microSD until internal Linux is verified.
+3. Keep a working microSD as recovery until UFS Linux is verified.
+
+### Already installed but black screen on UFS?
+
+Boot from microSD and run:
+
+```bash
+sudo apt install abootimg   # if needed
+sudo ./ufs-fix-internal-boot.sh
+```
+
+Then remove the SD and test UFS boot again.
 
 ## Recovery if something goes wrong
 

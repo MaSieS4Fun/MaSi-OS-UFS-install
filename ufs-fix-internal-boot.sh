@@ -2,11 +2,10 @@
 # Repair MaSi-OS / ROCKNIX internal boot on UFS (run as root from microSD).
 set -euo pipefail
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 
 # shellcheck source=ufs-bootimg.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ufs-bootimg.sh"
-INTERNAL_CMDLINE="$UFS_INTERNAL_CMDLINE"
 
 FIX_KERNEL=1
 FIX_FSTAB=1
@@ -21,11 +20,11 @@ usage() {
   cat <<EOF
 ufs-fix-internal-boot v${VERSION}
 
-Repair MaSi-OS / ROCKNIX internal boot (copy KERNEL + optional fstab).
-Copies /boot/KERNEL to ROCKNIX — same file as microSD (no cmdline patch on current builds).
+Repair MaSi-OS / ROCKNIX internal boot (KERNEL + optional fstab).
+Writes ROCKNIX/KERNEL with root=PARTLABEL=STORAGE (UFS-safe, not SD UUID).
 
 Options:
-  --kernel-only   Copy KERNEL to ROCKNIX partition only
+  --kernel-only   Fix KERNEL on ROCKNIX partition only
   --fstab-only    Fix /etc/fstab on STORAGE only
   --dry-run       Show actions without writing
   --force         Skip confirmation
@@ -81,21 +80,17 @@ root_on_same_disk() {
 patch_kernel() {
   local rk_dev=$1 tmp=$2
   if (( DRY_RUN )); then
-    log "[dry-run] copy /boot/KERNEL → ROCKNIX/KERNEL"
+    log "[dry-run] pack /boot/KERNEL → ROCKNIX/KERNEL (root=PARTLABEL=STORAGE)"
     return
   fi
-  if read_bootimg_cmdline /boot/KERNEL 2>/dev/null | grep -qE 'masi\.ufsroot=PARTLABEL=STORAGE|root=PARTLABEL=STORAGE'; then
-    log "Copying /boot/KERNEL to ROCKNIX (same file as microSD)..."
-    cp -a /boot/KERNEL "${tmp}/KERNEL"
-  else
-    log "Legacy KERNEL — patching cmdline (needs abootimg)..."
-    command -v abootimg >/dev/null || die "Install abootimg: sudo apt install abootimg"
-    patch_kernel_for_internal_boot /boot/KERNEL "${tmp}/KERNEL" "$INTERNAL_CMDLINE" \
-      || die "abootimg failed"
-  fi
+  command -v abootimg >/dev/null || die "Install abootimg: sudo apt install abootimg"
+  log "Writing UFS-safe KERNEL to ROCKNIX (root=PARTLABEL=STORAGE)..."
+  install_kernel_for_ufs_rocknix /boot/KERNEL "${tmp}/KERNEL" \
+    || die "abootimg pack failed"
   md5sum "${tmp}/KERNEL" | awk '{print $1}' > "${tmp}/KERNEL.md5"
-  verify_internal_kernel_cmdline "${tmp}/KERNEL" \
+  verify_ufs_rocknix_kernel_cmdline "${tmp}/KERNEL" \
     || die "KERNEL cmdline still wrong after repair"
+  log "ROCKNIX KERNEL: $(describe_kernel_root "${tmp}/KERNEL")"
 }
 
 fix_fstab_on_storage() {
@@ -157,7 +152,8 @@ Re-run: sudo ./install-masios-to-internal.sh --deploy-only"
   esac
 
   echo
-  echo "This fix will copy /boot/KERNEL to ROCKNIX/KERNEL (same file as microSD)."
+  echo "This fix writes ROCKNIX/KERNEL with root=PARTLABEL=STORAGE (UFS-safe)."
+  echo "SD /boot/KERNEL is left unchanged."
   echo
 
   if (( ! FORCE && ! DRY_RUN )); then
@@ -189,7 +185,7 @@ Re-run: sudo ./install-masios-to-internal.sh --deploy-only"
   fi
 
   echo
-  log "Done. Reboot with ABL in Linux mode (keep SD inserted for first test)."
+  log "Done. Remove microSD and reboot ABL in Linux mode to test UFS boot."
 }
 
 main "$@"

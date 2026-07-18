@@ -110,10 +110,13 @@ if [[ -n "$RK" && -b "$RK" ]]; then
     ls -la /tmp/rkdiag/
     if [[ -f /tmp/rkdiag/KERNEL ]]; then
       echo "Internal KERNEL root target: $(describe_kernel_root /tmp/rkdiag/KERNEL)"
-      if verify_internal_kernel_cmdline /tmp/rkdiag/KERNEL 2>/dev/null; then
-        log "Internal KERNEL cmdline OK for UFS boot"
+      if verify_ufs_rocknix_kernel_cmdline /tmp/rkdiag/KERNEL 2>/dev/null; then
+        log "Internal KERNEL cmdline OK for UFS boot (root=PARTLABEL=STORAGE)"
+      elif verify_internal_kernel_cmdline /tmp/rkdiag/KERNEL 2>/dev/null; then
+        warn "Internal KERNEL still has SD root=UUID= — UFS boot may black-screen without SD"
+        warn "Fix: sudo ./ufs-fix-internal-boot.sh --kernel-only"
       else
-        warn "Internal KERNEL still points at microSD UUID or wrong root — Linux will not boot from UFS"
+        warn "Internal KERNEL cmdline wrong — Linux will not boot from UFS"
         warn "Fix: sudo ./ufs-fix-internal-boot.sh --kernel-only"
       fi
     else

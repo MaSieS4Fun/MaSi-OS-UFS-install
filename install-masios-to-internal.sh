@@ -14,7 +14,8 @@
 # Requirements:
 #   - Run as root from MaSi-OS/Armbian on microSD
 #   - ROCKNIX ABL installed on the device
-#   - /boot/KERNEL (MaSi-OS multidevice ROCKNIX ABL bootimg — same file for SD and UFS)
+#   - /boot/KERNEL (MaSi-OS multidevice ROCKNIX ABL bootimg)
+#   - abootimg (apt install abootimg) — packs UFS-safe KERNEL for ROCKNIX
 #   - Qualcomm SM8550 SoC (AYN Odin 2, Thor, Odin 2 Mini/Portal, etc.)
 #
 # Usage:
@@ -24,7 +25,7 @@
 
 set -euo pipefail
 
-VERSION="1.7.1"
+VERSION="1.8.0"
 
 # shellcheck source=ufs-bootimg.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ufs-bootimg.sh"
@@ -405,8 +406,9 @@ Re-run with --resume after fixing partitions, or use ABL 'Uninstall ROCKNIX'."
 
 check_dependencies() {
   local dep
-  for dep in parted mkfs.vfat mkfs.ext4 rsync findmnt blockdev timeout lsblk; do
-    command -v "$dep" >/dev/null 2>&1 || die "Missing dependency: ${dep}"
+  for dep in parted mkfs.vfat mkfs.ext4 rsync findmnt blockdev timeout lsblk abootimg; do
+    command -v "$dep" >/dev/null 2>&1 || die "Missing dependency: ${dep}
+Install: sudo apt install abootimg"
   done
 }
 
@@ -640,15 +642,19 @@ mount_target_partitions() {
 
 copy_boot() {
   if (( DRY_RUN )); then
-    log "[dry-run] copy ${BOOT_SRC}/KERNEL → ROCKNIX/KERNEL (same file as microSD)"
+    log "[dry-run] pack ${BOOT_SRC}/KERNEL → ROCKNIX/KERNEL (root=PARTLABEL=STORAGE)"
     return
   fi
-  log "Copying KERNEL to ROCKNIX (same bootimg as microSD — no cmdline patch)..."
-  cp -a "${BOOT_SRC}/KERNEL" "${TMP_BOOT}/KERNEL"
+  # SD KERNEL uses root=UUID=... ; ROCKNIX must use PARTLABEL only or UFS boot
+  # races / hangs when the microSD is removed (black screen on some units).
+  log "Installing KERNEL on ROCKNIX with root=PARTLABEL=STORAGE (UFS-safe)..."
+  install_kernel_for_ufs_rocknix "${BOOT_SRC}/KERNEL" "${TMP_BOOT}/KERNEL" \
+    || die "Failed to pack UFS KERNEL (need: sudo apt install abootimg)"
   md5sum "${TMP_BOOT}/KERNEL" | awk '{print $1}' > "${TMP_BOOT}/KERNEL.md5"
   [[ -f "${TMP_BOOT}/KERNEL" ]] || die "KERNEL was not written to ROCKNIX partition"
-  verify_internal_kernel_cmdline "${TMP_BOOT}/KERNEL" \
-    || die "Verify failed: KERNEL missing root=PARTLABEL=STORAGE (run ./make.sh && sudo ./update.sh)"
+  verify_ufs_rocknix_kernel_cmdline "${TMP_BOOT}/KERNEL" \
+    || die "Verify failed: ROCKNIX KERNEL must use root=PARTLABEL=STORAGE (not SD root=UUID=)"
+  log "ROCKNIX KERNEL: $(describe_kernel_root "${TMP_BOOT}/KERNEL")"
   sync
 }
 
@@ -658,13 +664,15 @@ verify_install() {
   fi
   log "Verifying installation before reboot..."
   [[ -f "${TMP_BOOT}/KERNEL" ]] || die "Verify failed: no KERNEL on ROCKNIX partition"
-  verify_internal_kernel_cmdline "${TMP_BOOT}/KERNEL" \
-    || die "Verify failed: KERNEL cmdline is not set for dual boot (expected root=PARTLABEL=STORAGE)"
+  verify_ufs_rocknix_kernel_cmdline "${TMP_BOOT}/KERNEL" \
+    || die "Verify failed: ROCKNIX KERNEL cmdline is not UFS-safe (need root=PARTLABEL=STORAGE, no root=UUID=)"
   [[ -d "${TMP_ROOT}/etc" ]] || die "Verify failed: STORAGE rootfs looks empty"
+  [[ -f "${TMP_ROOT}/sbin/init" || -e "${TMP_ROOT}/sbin/init" || -L "${TMP_ROOT}/sbin/init" ]] \
+    || die "Verify failed: STORAGE missing /sbin/init (rootfs copy incomplete?)"
   [[ -f "${TMP_ROOT}/etc/fstab" ]] || die "Verify failed: missing /etc/fstab on STORAGE"
   grep -q 'PARTLABEL=STORAGE' "${TMP_ROOT}/etc/fstab" \
     || die "Verify failed: fstab does not reference PARTLABEL=STORAGE"
-  log "Verification passed (internal KERNEL cmdline + fstab OK)."
+  log "Verification passed (UFS KERNEL cmdline + rootfs + fstab OK)."
 }
 
 copy_rootfs() {
@@ -729,12 +737,12 @@ print_summary() {
     warn "Dry-run mode: nothing was written to disk."
   else
     echo "  IMPORTANT:"
-    echo "    1. Same KERNEL on SD and ROCKNIX (root=PARTLABEL=STORAGE + masi.sdroot)."
-    echo "    2. First internal Linux test: remove microSD if boot fails (see docs)."
-    echo "    3. Android: boot recovery -> Factory data reset (userdata was wiped)."
-    echo "  If Linux black-screens: sudo masi-ufs-diagnose"
-    echo "  Quick repair (partitions OK): sudo ufs-fix-internal-boot.sh"
-    echo "  Kernel update later: cd Kernel_MaSi-OS && sudo ./update.sh"
+    echo "    1. ROCKNIX KERNEL uses root=PARTLABEL=STORAGE (independent of microSD)."
+    echo "    2. First UFS Linux test: remove microSD, ABL Linux mode, power on."
+    echo "    3. Android: recovery -> Factory data reset (userdata was wiped)."
+    echo "  If Linux black-screens: sudo ./ufs-diagnose.sh"
+    echo "  Quick repair (partitions OK): sudo ./ufs-fix-internal-boot.sh"
+    echo "  Kernel update later: rebuild + update.sh (must re-sync ROCKNIX KERNEL)"
   fi
 }
 
